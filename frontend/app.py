@@ -25,6 +25,7 @@ from src.domain_matcher import DomainMatcher, DOMAIN_PROFILES
 from src.skill_analyzer import SkillAnalyzer
 from src.predictor import ResumePredictor
 from src.explainer import Explainer
+from src.jd_analyzer import JDAnalyzer
 
 # ── API Client ────────────────────────────────────────────────────────────────
 # Bug 8 Fix: Imported from api_client.py — single source of truth for all API calls.
@@ -75,6 +76,23 @@ st.markdown("""
         display: inline-block; background: rgba(231, 76, 60, 0.15); color: #e74c3c;
         border: 1px solid #e74c3c; border-radius: 20px;
         padding: 2px 12px; margin: 3px; font-size: 0.82rem; font-weight: 600;
+    }
+    .skill-tag-orange {
+        display: inline-block; background: rgba(243, 156, 18, 0.15); color: #f39c12;
+        border: 1px solid #f39c12; border-radius: 20px;
+        padding: 2px 12px; margin: 3px; font-size: 0.82rem; font-weight: 600;
+    }
+    .jd-match-banner {
+        text-align: center; padding: 1.5rem;
+        border-radius: 14px; margin-bottom: 1rem;
+        border: 1px solid rgba(0, 198, 255, 0.2);
+    }
+    .jd-match-banner .pct { font-size: 3rem; font-weight: 900; }
+    .suggestion-card {
+        background-color: var(--secondary-background-color);
+        border-radius: 10px; padding: 0.9rem 1.2rem;
+        margin-bottom: 0.6rem; border-left: 3px solid #00c6ff;
+        line-height: 1.5;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -138,7 +156,7 @@ with st.sidebar:
         st.divider()
         page = st.radio(
             "📌 Navigation",
-            ["🏠 Home", "🔍 Tech Skill Analysis", "📄 IT Resume Scorer", "📊 Tech Domain Explorer", "👤 My Profile"],
+            ["🏠 Home", "🔍 Tech Skill Analysis", "📄 IT Resume Scorer", "📋 JD Analyzer", "📊 Tech Domain Explorer", "👤 My Profile"],
             index=0,
         )
     else:
@@ -269,6 +287,7 @@ elif page == "🏠 Home":
 - **Tech Stack Matching** — Finds your ideal IT role using set-based similarity.
 - **Skill Gap Analysis** — Identifies missing frameworks/languages and ranks them.
 - **Resume Scoring** — Predicts the likelihood your tech resume passes an ATS/HR screening.
+- **JD Analyzer** — Paste any job description to see exact keyword gaps and get actionable resume edits.
 - **AI Explainability** — Uses SHAP to break down exactly which metrics impacted your score.
 - **Developer Roadmap** — Generates a week-by-week learning plan to close your tech gap.
         """)
@@ -565,6 +584,10 @@ elif page == "📄 IT Resume Scorer":
                 "probability": prob,
                 "label": label,
                 "skill_gap": gap_report["gap_percentage"],
+
+                "project_count": projects,
+                "certification_count": certs,
+                "domain_fit_score": gap_report["coverage_score"]
             }
             st.session_state.last_save_status = None  # reset status on new prediction
 
@@ -593,6 +616,223 @@ elif page == "📄 IT Resume Scorer":
                         st.warning(f"⚠️ Could not save ({response.status_code}): {detail}")
                 except Exception as e:
                     st.warning(f"⚠️ Could not reach the backend: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: JD ANALYZER
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "📋 JD Analyzer":
+    st.markdown('<p class="main-title">📋 Job Description Analyzer</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Paste a JD → compare it against your profile → get exact resume edits</p>', unsafe_allow_html=True)
+
+    jd_analyzer = JDAnalyzer(nlp_processor=processor)
+
+    # ── Step 1: Paste the Job Description ──────────────────────────────────
+    st.markdown('<p class="section-header">Step 1 — Paste the Job Description</p>', unsafe_allow_html=True)
+    jd_text = st.text_area(
+        "Job Description:",
+        placeholder="Paste the full job description here…\n\nExample: We are looking for a Senior Python Developer with 3+ years of experience in Django, REST APIs, PostgreSQL, Docker, and CI/CD. Bachelor's degree required.",
+        height=220,
+        key="jd_input",
+    )
+
+    # ── Step 2: Confirm / adjust your profile ──────────────────────────────
+    st.markdown('<p class="section-header">Step 2 — Your Profile</p>', unsafe_allow_html=True)
+
+    if st.session_state.memory_skills:
+        st.info("💡 Skills pre-filled from your session. Edit below if needed.")
+
+    col_skills, col_meta = st.columns([2, 1])
+    with col_skills:
+        profile_skills = st.text_area(
+            "Your Skills (comma-separated):",
+            value=st.session_state.memory_skills,
+            height=90,
+            key="jd_profile_skills",
+        )
+    with col_meta:
+        profile_exp = st.slider(
+            "Years of Experience", 0.0, 15.0,
+            float(round(st.session_state.memory_exp, 1)),
+            key="jd_exp",
+        )
+        edu_options = ["No degree", "Bachelor's", "Master's / PhD"]
+        safe_edu = st.session_state.memory_edu if st.session_state.memory_edu in edu_options else "Bachelor's"
+        profile_edu = st.selectbox(
+            "Education", edu_options,
+            index=edu_options.index(safe_edu),
+            key="jd_edu",
+        )
+
+    # ── Step 3: Analyze ────────────────────────────────────────────────────
+    if st.button("🔎 Analyze Job Description", type="primary", use_container_width=True):
+        if not jd_text.strip():
+            st.warning("Please paste a job description first.")
+        elif not profile_skills.strip():
+            st.warning("Please enter your skills.")
+        else:
+            user_skills_list = processor.skills_from_list(profile_skills)
+            # Also include unrecognized terms so users see them
+            raw_input_skills = [s.strip().lower() for s in profile_skills.split(",") if s.strip()]
+            combined_user_skills = list(set(user_skills_list) | set(raw_input_skills))
+
+            with st.spinner("Analyzing job description against your profile…"):
+                result = jd_analyzer.analyze(
+                    jd_text=jd_text,
+                    user_skills=combined_user_skills,
+                    user_experience=profile_exp,
+                    user_education=profile_edu,
+                )
+
+            # ── Results ────────────────────────────────────────────────────
+            st.divider()
+
+            # ── Match Banner ───────────────────────────────────────────────
+            pct = result["match_percentage"]
+            if pct >= 75:
+                pct_color = "#2ecc71"
+                pct_label = "🎯 Strong Match"
+            elif pct >= 50:
+                pct_color = "#f39c12"
+                pct_label = "⚡ Moderate Match"
+            else:
+                pct_color = "#e74c3c"
+                pct_label = "🚨 Low Match"
+
+            st.markdown(f"""
+            <div class="jd-match-banner" style="background: linear-gradient(135deg, {pct_color}15, {pct_color}05);">
+                <div class="pct" style="color: {pct_color};">{pct}%</div>
+                <div style="font-size:1.1rem; font-weight:600; color: {pct_color};">{pct_label}</div>
+                <div style="color: gray; font-size: 0.85rem; margin-top: 0.3rem;">
+                    {len(result['matched_skills'])} of {len(result['jd_skills'])} required tech skills matched
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Metrics Row ────────────────────────────────────────────────
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.metric("JD Keywords Found", len(result["jd_skills"]))
+            with m2:
+                st.metric("You Match", len(result["matched_skills"]))
+            with m3:
+                st.metric("You're Missing", len(result["missing_skills"]))
+            with m4:
+                exp_str = f"{result['experience_required']}+ yrs" if result['experience_required'] else "—"
+                st.metric("Exp. Required", exp_str)
+
+            st.divider()
+
+            # ── Matched vs Missing Skills ──────────────────────────────────
+            col_match, col_miss = st.columns(2)
+            with col_match:
+                st.markdown('<p class="section-header">✅ Skills You Have</p>', unsafe_allow_html=True)
+                if result["matched_skills"]:
+                    tags = "".join(
+                        f'<span class="skill-tag-green">{s.title()}</span>'
+                        for s in result["matched_skills"]
+                    )
+                    st.markdown(tags, unsafe_allow_html=True)
+                else:
+                    st.caption("No matching skills detected.")
+
+            with col_miss:
+                st.markdown('<p class="section-header">❌ Skills You Need</p>', unsafe_allow_html=True)
+                if result["missing_skills"]:
+                    tags = "".join(
+                        f'<span class="skill-tag-red">{s.title()}</span>'
+                        for s in result["missing_skills"]
+                    )
+                    st.markdown(tags, unsafe_allow_html=True)
+                else:
+                    st.success("You cover every skill in the JD! 🎉")
+
+            # ── Priority Skills ────────────────────────────────────────────
+            if result["priority_skills"]:
+                st.markdown('<p class="section-header">🏆 Priority Skills to Learn</p>', unsafe_allow_html=True)
+                st.caption("Ranked by demand across all IT domains — learn these first for maximum ROI.")
+                for i, skill in enumerate(result["priority_skills"], 1):
+                    st.markdown(f"**{i}.** {skill.title()}")
+
+            st.divider()
+
+            # ── ATS Buzzwords ──────────────────────────────────────────────
+            if result["ats_buzzwords_in_jd"]:
+                st.markdown('<p class="section-header">🔤 ATS Buzzwords in this JD</p>', unsafe_allow_html=True)
+                bw_have = set(result["ats_buzzwords_user_has"])
+                bw_tags = ""
+                for bw in result["ats_buzzwords_in_jd"]:
+                    if bw in bw_have:
+                        bw_tags += f'<span class="skill-tag-green">{bw.title()}</span>'
+                    else:
+                        bw_tags += f'<span class="skill-tag-orange">{bw.title()}</span>'
+                st.markdown(bw_tags, unsafe_allow_html=True)
+                st.caption("🟢 = you have it · 🟠 = add to your resume")
+
+            st.divider()
+
+            # ── Experience & Education Checks ──────────────────────────────
+            col_exp, col_edu = st.columns(2)
+            with col_exp:
+                if result["experience_required"] is not None:
+                    if result["experience_met"]:
+                        st.success(f"✅ Experience: {result['experience_required']}+ years required — you meet this.")
+                    else:
+                        st.warning(f"⚠️ Experience: {result['experience_required']}+ years required — you have {profile_exp} years.")
+                else:
+                    st.info("ℹ️ No specific experience requirement detected in JD.")
+            with col_edu:
+                if result["education_required"]:
+                    if result["education_met"]:
+                        st.success(f"✅ Education: {result['education_required']} required — you meet this.")
+                    else:
+                        st.warning(f"⚠️ Education: {result['education_required']} required — consider adding certifications.")
+                else:
+                    st.info("ℹ️ No specific education requirement detected in JD.")
+
+            st.divider()
+
+            # ── Actionable Suggestions ─────────────────────────────────────
+            st.markdown('<p class="section-header">💡 Resume Edit Suggestions</p>', unsafe_allow_html=True)
+            for suggestion in result["suggestions"]:
+                st.markdown(f'<div class="suggestion-card">{suggestion}</div>', unsafe_allow_html=True)
+
+            # ── Visualization: Match Radar ─────────────────────────────────
+            st.divider()
+            st.markdown('<p class="section-header">📊 Match Breakdown</p>', unsafe_allow_html=True)
+
+            categories = ["Tech Skills", "ATS Buzzwords", "Experience", "Education"]
+            jd_total_bw = len(result["ats_buzzwords_in_jd"]) or 1
+            user_bw_pct = round(len(result["ats_buzzwords_user_has"]) / jd_total_bw * 100, 1)
+            exp_score = 100 if result["experience_met"] else (round(profile_exp / (result["experience_required"] or 1) * 100, 1) if result["experience_required"] else 100)
+            edu_score = 100 if result["education_met"] else 50
+
+            values = [pct, user_bw_pct, min(exp_score, 100), edu_score]
+
+            fig_radar = go.Figure()
+            fig_radar.add_trace(go.Scatterpolar(
+                r=values + [values[0]],
+                theta=categories + [categories[0]],
+                fill="toself",
+                fillcolor="rgba(0,198,255,0.15)",
+                line=dict(color="#00c6ff", width=2),
+                name="Your Profile",
+            ))
+            fig_radar.add_trace(go.Scatterpolar(
+                r=[100, 100, 100, 100, 100],
+                theta=categories + [categories[0]],
+                line=dict(color="rgba(46,204,113,0.3)", width=1, dash="dot"),
+                name="Ideal",
+            ))
+            fig_radar.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                showlegend=True,
+                height=380,
+                margin=dict(l=60, r=60, t=30, b=30),
+                paper_bgcolor="rgba(0,0,0,0)",
+                font_color=st.get_option("theme.textColor") or "gray",
+            )
+            st.plotly_chart(fig_radar, use_container_width=True)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE: DOMAIN EXPLORER

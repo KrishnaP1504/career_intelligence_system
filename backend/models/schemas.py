@@ -37,6 +37,12 @@ class SaveRecordRequest(BaseModel):
     probability: float
     label: str
     skill_gap: float
+    
+    
+    project_count: int
+    certification_count: int
+    domain_fit_score: float
+
     # Bug 12 Fix: Auto-stamp every saved record with UTC time
     timestamp: Optional[datetime] = None
 
